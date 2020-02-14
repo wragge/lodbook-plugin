@@ -69,10 +69,10 @@ module Jekyll
     # Namespace for the LODBook plugin
     module LODBook
         require 'json/ld'
-        # Preload to save time
+        # Preload schema to save time
+        # Where should this go?
         ctx = JSON::LD::Context.new.parse('http://schema.org/')
         JSON::LD::Context.add_preloaded('http://schema.org/', ctx)
-
         # --------------------
         # UTILITIES
         # --------------------
@@ -108,10 +108,9 @@ module Jekyll
             def get_graph(site)
                 # lod_source are the data config details
                 # data is the parsed data file
-                # context = get_context(lod_source, data)
                 # if this is JSON-LD it'll be a hash with a 'graph' key
                 # But will it? No. Maybe.
-                # Explicitly state the data type in config -- YAML, JSON-LD, & possibly CSV?
+                # Explicitly state the data type in config? YAML, JSON-LD, & possibly CSV?
                 context = get_context(site)
                 data = site.data[site.config['lod_source']['data']]
                 if data.is_a?(Hash) && data.key?('@graph')
@@ -119,7 +118,7 @@ module Jekyll
                     str_context = context.is_a?(String) ? context : JSON.parse(context.to_json)
                     # Not sure if this is really necessary, but it ensures a standard format
                     compact = compact_jsonld(str_context, data)
-                    # Won't necessarily have a graph value -- only if there originally
+                    # Won't necessarily have a graph value
                     # Need to change this??
                     graph = compact['@graph']
                 else
@@ -128,28 +127,15 @@ module Jekyll
                 graph
             end
 
-            # Return LOD context and data payload
-            def parse_data(site)
-                context = get_context(site)
-                graph = get_graph(site)
-                { context: context, graph: graph }
-            end
-
+            # Parse, expand, and compact JSON data to try and standardise format
             def compact_jsonld(context, data)
                 lod = JSON.parse(data.to_json)
-                # Not sure if this is really necessary, but it ensures a standard format
+                # Not sure if this is really necessary, but I think it ensures a standard format
                 expanded = JSON::LD::API.expand(lod)
-                # Should this be flattened rather than compacted? No I think flattening it changes the structure
                 JSON::LD::API.compact(expanded, context)
             end
 
-            # NOT USED??
-            def format_url(context, name, collection)
-                @site_url = context.registers[:site].config['url']
-                @base_url = context.registers[:site].config['baseurl']
-                "#{@site_url}#{@base_url}/#{collection}/#{Utils.slugify(name)}/"
-            end
-
+            # Construct a URI for a data entity
             def create_entity_uri(site, collection, entity_name)
                 site_url = site.config['url']
                 base_url = site.config['baseurl']
@@ -157,31 +143,41 @@ module Jekyll
                 "#{site_url}#{base_url}/#{collection}/#{filename}/"
             end
 
+            # Use 'name' to retrieve an entity record from the data file
             def get_record(data, name)
                 data.find { |r| r['name'] == name }
             end
         end
 
-        # Runs before the entity pages are rendered
+        # This code is called by the page pre-render hook and runs before the entity pages are rendered
         # Gets mentions from the narrative pages and inserts them into an entity's LOD
         # and makes them available to HTML page for display
         module PagePreRender
             include Utilities
 
+            # Strip HTML tags from a string
             def remove_tags(str)
                 str.gsub(%r{<\/?[^>]*>}, '')
             end
 
+            # Get the specified number of words from an HTML string
+            # The first and last params indicate the span of words you want,
+            # so -5 and -1 will get you the last five words in a string.
             def get_keyword_string(str, first, last)
                 remove_tags(str).split[first..last]&.join(' ')
             end
 
+            # Given the index of a specified anchor in an HTML string,
+            # this will return a string with the specified number of words
+            # either side of the anchor text, thus showing the match in context.
             def extract_context_from_match(para, anchor, index, number_of_words = 5)
                 before = get_keyword_string(para.inner_html[0..index - 1], 0 - number_of_words, -1)
                 after = get_keyword_string(para.inner_html[index + anchor.length..-1], 0, number_of_words)
                 "#{before} <em>#{remove_tags(anchor)}</em> #{after}".strip
             end
 
+            # Scan the html contents of a para to find occurances of the
+            # specified link, then grab a string showing the link text in context.
             def extract_mentions_from_para(document, para_id, para, anchor)
                 mentions = []
                 para.inner_html.scan(/#{anchor}/) do
@@ -196,6 +192,7 @@ module Jekyll
                 mentions
             end
 
+            # Find all the links in a para that refer to the specified entity.
             def extract_anchors_from_para(para, name)
                 anchors = []
                 # Find all links to this entity in the current para
@@ -205,6 +202,8 @@ module Jekyll
                 anchors
             end
 
+            # Find all the mentions of specified entity in a marrative page.
+            # Save document and para details with an array of context strings.
             def extract_mentions_from_page(document, name)
                 mentions = []
                 html = Nokogiri::HTML(document.output)
@@ -213,11 +212,6 @@ module Jekyll
                     para_id = para.attr('id').split('-')[1]
                     anchors = extract_anchors_from_para(para, name)
                     # Find all links to this entity in the current para
-
-                    # puts keyword
-                    # para = link.parent
-                    # para.text.scan(/.*{50}(?=#{keyword})(?<=#{keyword}).*{50}/)[0].split[0,5].join(' ')
-                    # Now loop through all the links extracting 5 words wither side to give the context
                     anchors.each do |anchor|
                         mentions += extract_mentions_from_para(document, para_id, para, anchor)
                     end
@@ -225,6 +219,8 @@ module Jekyll
                 mentions
             end
 
+            # Check if the entity associated with the specified document is
+            # mentioned in the narative page. If so, return the details.
             def are_there_mentions(document, page)
                 data = document.data
                 config = page.site.config
@@ -234,18 +230,24 @@ module Jekyll
                 { 'id' => data['data']['id'], 'name' => data['title'], 'type' => 'WebPage' }
             end
 
+            # Update the contents of the JSONLD representation of the entity
+            # (adding in the mentions we've extracted from the narrative pages )
             def update_jsonld(page, lod)
                 compacted = compact_jsonld(page.data['data']['@context'], lod)
                 jsonld_page = page.site.pages.find { |p| p.url == "#{page.url}index.json" }
                 jsonld_page.content = JSON.pretty_generate(compacted)
             end
 
+            # Update the contents of the Turtle representation of the entity
+            # (adding in the mentions we've extracted from the narrative pages )
             def update_turtle(page, lod)
                 turtle = page.site.pages.find { |p| p.url == "#{page.url}index.ttl" }
                 graph = RDF::Graph.new << JSON::LD::API.toRdf(lod)
                 turtle.content = graph.dump(:ttl)
             end
 
+            # Add the mentions data to the entity page and update the LOD
+            # representations
             def update_lod(page, mentioned_by, mentions)
                 # Save the details of pages that mention this thing into the data
                 page.data['data']['mentionedBy'] = mentioned_by unless mentioned_by.empty?
@@ -257,12 +259,12 @@ module Jekyll
                 update_jsonld(page, lod)
             end
 
+            # Collect and add data from narrative pages to an entity page
             def enrich_page(page)
                 return unless page.data.key?('data')
 
                 mentions = []
                 mentioned_by = []
-                # collection, _id = page.url.split('/')
                 # Loop through the narrative pages for any references to this entity
                 page.site.documents.each do |document|
                     # If there's one or more references to this entity in this page
@@ -278,7 +280,7 @@ module Jekyll
             end
         end
 
-        # Class to help in preparing LOD
+        # Class to help in preparing LOD repsentations
         class GraphMaker
             require 'json/ld'
             include Utilities
@@ -286,19 +288,12 @@ module Jekyll
 
             def initialize(site)
                 @site = site
-                # lod_source = site.config['lod_source']
-                # data_source = site.data[lod_source['data']]
                 @types = site.config['data_types']
                 @data = get_graph(@site)
                 @graph = {}
             end
 
-            def process_record2(properties)
-                # puts properties
-                @graph << extract_properties_from_record(properties)
-            end
-
-            # Convert record to LOD
+            # Convert data to LOD, adding in ids and types etc where necessary
             # Data is expected to be a hash
             def convert_to_lod(data)
                 data.each do |key, value|
@@ -306,6 +301,7 @@ module Jekyll
                 end
             end
 
+            # Examine what a value actually is and proces it accordingly.
             def extract_properties(parent, key, value)
                 if value.is_a?(Hash)
                     process_hash(key, value)
@@ -323,13 +319,13 @@ module Jekyll
                     properties['name'] = value
                     # If the value doesn't already have an id or type, create one from the name
                     properties.merge!(hydrate_link(parent, value))
-                    # Normalise type and id labels
                 else
                     properties = normalise_label(key, value, properties)
                 end
                 properties
             end
 
+            # Normalise id and type labels
             def normalise_label(key, value, properties)
                 if key == 'type'
                     properties['@type'] = @types.key?(value) ? @types[value]['type'] : value
@@ -341,6 +337,7 @@ module Jekyll
                 properties
             end
 
+            # Process an array of values
             def process_array(key, value)
                 values = []
                 value.each do |v|
@@ -349,6 +346,7 @@ module Jekyll
                 { key => collapse_array(values) }
             end
 
+            # Process all the keys/values in a hash
             def process_hash(key, value)
                 properties = {}
                 value.each do |k, v|
@@ -357,15 +355,19 @@ module Jekyll
                 { key => properties }
             end
 
+            # Strips the keys to return an array of values only
             def collapse_array(values)
                 values.map(&:values)
             end
 
+            # Get the type of an entity
+            # This allows the internal use of types mapped to major types in
+            # the site config.
             def get_type(record)
                 @types[record['type']]['type']
             end
 
-            # Add properties to link
+            # Add properties to link, including 'id', 'type', and 'image'
             def add_link_properties(parent, name, record)
                 unless parent.key?('id') || parent.key?('@id')
                     id = create_entity_uri(@site, @types[record['type']]['collection'], name)
@@ -380,7 +382,7 @@ module Jekyll
             # Here we'll expand and LODify the link info by adding additional properties
             # such as id and type.
             def hydrate_link(parent, name)
-                record = get_record(name)
+                record = get_record(@data, name)
                 if record
                     link = add_link_properties(parent, name, record)
                 else
@@ -389,14 +391,11 @@ module Jekyll
                 end
                 link
             end
-
-            def get_record(prop)
-                # Retrieve a data record using it's name property
-                @data.find { |r| r['name'] == prop }
-            end
         end
 
-        # Class for text/narrative pages.
+        # Class for text/narrative pages
+        # This is called by the post-render hook, so it can modify the page's
+        # HTML content.
         class ContentPage
             require 'nokogiri'
             include Utilities
@@ -437,7 +436,10 @@ module Jekyll
                 end
             end
 
-            # Add HTML links to other instances of the labels marked up by LODLink tags.
+            # Add HTML links to other instances of the labels marked up by LODLink tags on this page.
+            # So if you've used the lod tag to mark up one reference to 'James Minahan'
+            # on this page, links will now be added to all other occurance of James Minahan
+            # on this page. This behaviour can be controlled using the LODIgnore tag.
             def markup_labels
                 labels = @references.keys.sort_by(&:length).reverse!
                 @html.css('#text p').each do |para|
@@ -447,6 +449,8 @@ module Jekyll
                 end
             end
 
+            # Add LOD links to any occurances of the specified label in the
+            # current para.
             def markup_para(para, label)
                 para.children.each do |child|
                     next if child[:class] == 'lod-link' || child[:class] == 'lod-ignore'
@@ -455,15 +459,17 @@ module Jekyll
                 end
             end
 
+            # I gave up on trying to make a regexp that would do all this.
+            # Instead we parse the HTML and then examine each node for matches.
+            # If matches are found we wrap a LOD link around them and update the HTML.
             def markup_child_node(child, para, label)
                 link = create_link_for_markup(label)
                 if child.text? && child.content.include?(label)
                     # Adding this dummy node stops the new content merging into the old
                     dummy = child.add_previous_sibling(Nokogiri::XML::Node.new('dummy', para))
                     # Create node for marked up content
-                    dummy.add_previous_sibling child.content.gsub(/\b#{label}\b/, "#{link}#{label}</a>")
                     # Add marked up content to node
-                    # new_child.inner_html = child.content.gsub(/\b#{label}\b/, "#{link}#{label}</a>")
+                    dummy.add_previous_sibling child.content.gsub(/\b#{label}\b/, "#{link}#{label}</a>")
                     # Remove old nodes
                     child.remove
                     dummy.remove
@@ -472,6 +478,7 @@ module Jekyll
                 end
             end
 
+            # Format a LOD link for insertion
             def create_link_for_markup(label)
                 name = @references[label][:name]
                 collection = @references[label][:collection]
@@ -481,12 +488,13 @@ module Jekyll
                 " href=\"#{url}\">"
             end
 
-            # Look up the names in the data set, and LODify their details
+            # Look up the names mentioned by a page and return their details as
+            # LOD
             def mentions_as_lod
                 names = names_from_references
                 mentions = []
                 names.each do |name|
-                    record = get_record(name)
+                    record = get_record(@data, name)
                     graph_maker = GraphMaker.new(@site)
                     graph_maker.convert_to_lod(record)
                     mentions |= [graph_maker.graph]
@@ -503,12 +511,14 @@ module Jekyll
                 names
             end
 
+            # Format a full URI for this page
             def create_page_id
                 site_url = @site.config['url']
                 base_url = @site.config['baseurl']
                 "#{site_url}#{base_url}#{@page.url}"
             end
 
+            # Create a LOD representation of this page
             def create_page_jsonld
                 mentions = mentions_as_lod
                 page_name = "Chapter #{@page.data['chapter']}: #{@page.data['title']}"
@@ -532,10 +542,7 @@ module Jekyll
                 jsonld
             end
 
-            def get_record(prop)
-                @data.find { |r| r['name'] == prop }
-            end
-
+            # Add some CSS values from config for the theme to use
             def add_styles
                 css = ''
                 @site.config['data_collections'].each do |collection|
@@ -574,6 +581,7 @@ module Jekyll
                 end
             end
 
+            # Process a record from the data file
             def process_record(record)
                 type = record['type']
                 if @types[type]
@@ -587,19 +595,22 @@ module Jekyll
                 end
             end
 
+            # Make the HTML page for the entity as well as JSONLD and Turtle representations
             def make_pages(collection, jsonld, template, name)
                 @site.pages << DataPage.new(@site, @site.source, collection, jsonld, template)
                 @site.pages << TurtlePage.new(@site, @site.source, collection, name)
                 @site.pages << JSONPage.new(@site, @site.source, collection, name)
             end
 
+            # Prepare a LOD representaion of the cuurent entity
+            # This gets updated in the pre-render phase to add mentions
+            # from narrative pages
             def create_graph(collection, record)
                 puts 'Making graph'
-                # Convert record hash into LOD
+                # Convert record hash data into LOD
                 graph_maker = GraphMaker.new(@site)
                 graph_maker.convert_to_lod(record)[0]
                 graph = graph_maker.graph
-                # puts graph
                 # Create page URI
                 page_id = create_entity_uri(@site, collection, record['name'])
                 # Make sure the record has an id
@@ -636,8 +647,6 @@ module Jekyll
                 self.data['contexts'] = []
                 # add all the information defined in _data for the current record to the
                 # current page (so that we can access it with liquid tags)
-                # self.data.merge!(data)
-                # puts 'Finished'
             end
         end
 
@@ -750,6 +759,10 @@ module Jekyll
         # --------------------
 
         # Gets the filename for an image.
+        # Images are linked by their name, so if we want to pull the image in
+        # to a page to display we need to resolve the name to a filename by
+        # finding the image record and grabbing the filename.
+        # This will display dramatic red error messages if images are missing.
         module ImageLink
             def image_link(image)
                 if image&.is_a?(Hash)
@@ -759,6 +772,7 @@ module Jekyll
                 end
             end
 
+            # Check the extension of the file to see if it's an image we can use.
             def check_extension(image)
                 extension = File.extname(image)
                 if ['.jpg', '.png', '.gif', '.jpeg'].include?(extension.downcase)
@@ -768,6 +782,7 @@ module Jekyll
                 end
             end
 
+            # Find an image record and get the filename
             def find_image_file(image)
                 image_name = image['name']
                 return unless image_name
@@ -834,7 +849,6 @@ module Jekyll
         # Wraps the JSON-LD in script tags.
         #
         # Feed it a page and get back JSON-LD wrapped in a script tag -- eg: {{ page | jsonldify }}
-        # TURN THIS INTO A BLOCK TAG?????
         module JSONLDGenerator
             require 'yaml'
             # require 'json'
@@ -955,14 +969,6 @@ module Jekyll
         end
     end
 end
-
-# pre render documents to tag additional mentions, then add mentions to page data
-
-# So it seems as if the pre/post rendering happens in groups rather than across the site:
-# 1. Generators
-# 2. documents (the narrative bits) -- prerender, then postrender
-# 3. pages (generated from data file) -- prerender, then postrender
-# So prerender phase of pages will access postrender version of documents...
 
 # --------------------
 # HOOKS
